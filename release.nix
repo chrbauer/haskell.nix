@@ -26,7 +26,7 @@ let
             (n == "latest" && include "ghc8107")
             || (ghcMatch != null && include (__head ghcMatch))) jobs) system));
 
-  jobs = lib.getAttrs supportedSystems (filterCiJobs defaultNix.ciJobs);
+  jobs = lib.getAttrs supportedSystems (filterCiJobs defaultNix.hydraJobs);
 
   windows-secp256k1 =
     let
@@ -49,7 +49,7 @@ let
     constituents = lib.collect lib.isDerivation (
       lib.optionalAttrs (jobs ? x86_64-darwin) {
         darwin-ghc8107  = jobs.x86_64-darwin.required-unstable-ghc8107-native;
-        darwin-ghc925   = jobs.x86_64-darwin.required-unstable-ghc925-native;
+        darwin-ghc927   = jobs.x86_64-darwin.required-unstable-ghc927-native;
       }
     );
   };

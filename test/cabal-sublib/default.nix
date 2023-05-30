@@ -20,6 +20,8 @@ let
     cabalProject = ''
       packages: .
       allow-newer: aeson:*
+    '' + lib.optionalString (__elem compiler-nix-name ["ghc96020230302" "ghc961" "ghc962"]) ''
+      allow-newer: *:base, *:ghc-prim, *:template-haskell
     '';
   };
 
@@ -47,7 +49,7 @@ in recurseIntoAttrs {
     optionalString (!stdenv.hostPlatform.isAarch32 && !stdenv.hostPlatform.isAarch64 && !stdenv.hostPlatform.isMusl) (''
       printf "checking that executable is dynamically linked to system libraries... " >& 2
     '' + optionalString (stdenv.isLinux && !stdenv.hostPlatform.isMusl) ''
-      ldd $exe | grep 'libc[.]so'
+      ${haskellLib.lddForTests} $exe | grep 'libc[.]so'
     '' + optionalString stdenv.isDarwin ''
       otool -L $exe |grep .dylib
     '') + ''
@@ -55,7 +57,11 @@ in recurseIntoAttrs {
       touch $out
     '';
 
-    meta.platforms = platforms.all;
+    meta = rec {
+      platforms = lib.platforms.all;
+      broken = stdenv.hostPlatform.isGhcjs && __elem compiler-nix-name ["ghc961" "ghc962"];
+      disabled = broken;
+    };
 
     passthru = {
       # Used for debugging with nix repl

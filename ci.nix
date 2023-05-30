@@ -13,6 +13,7 @@
   inherit (pkgs.haskell-nix) sources;
   nixpkgsVersions = {
     "R2205" = "nixpkgs-2205";
+    "R2211" = "nixpkgs-2211";
     "unstable" = "nixpkgs-unstable";
   };
   haskellNix = compat { inherit checkMaterialization system; };
@@ -46,33 +47,43 @@
       # cabal-install and nix-tools plans.  When removing a ghc version
       # from here (so that is no longer cached) also remove ./materialized/ghcXXX.
       # Update supported-ghc-versions.md to reflect any changes made here.
-      nixpkgs.lib.optionalAttrs (nixpkgsName == "R2205") {
-        ghc865 = false;
+      nixpkgs.lib.optionalAttrs (nixpkgsName == "R2211") {
         ghc8107 = false;
+        ghc902 = false;
+        ghc928 = false;
+        ghc945 = false;
       } // nixpkgs.lib.optionalAttrs (nixpkgsName == "unstable") {
-        ghc865 = false;
-        ghc884 = false; # Native version is used to boot 9.0.1
+        ghc884 = false;
         ghc8107 = true;
         ghc902 = false;
-        ghc924 = false;
-        ghc925 = true;
+        ghc928 = true;
+        ghc945 = true;
+        ghc962 = true;
       }));
   crossSystems = nixpkgsName: nixpkgs: compiler-nix-name:
     # We need to use the actual nixpkgs version we're working with here, since the values
     # of 'lib.systems.examples' are not understood between all versions
     let lib = nixpkgs.lib;
     in lib.optionalAttrs (nixpkgsName == "unstable"
-      && ((system == "x86_64-linux"  && __elem compiler-nix-name ["ghc865" "ghc884" "ghc8107"])
-       || (system == "x86_64-darwin" && __elem compiler-nix-name ["ghc8107"]))) {
+      && ((system == "x86_64-linux"  && __elem compiler-nix-name ["ghc8107" "ghc962"])
+       || (system == "aarch64-linux" && __elem compiler-nix-name ["ghc8107" "ghc962"])
+       || (system == "x86_64-darwin" && __elem compiler-nix-name ["ghc8107" "ghc962"])
+       || (system == "aarch64-darwin" && __elem compiler-nix-name ["ghc8107" "ghc962"])
+       )) {
     inherit (lib.systems.examples) ghcjs;
   } // lib.optionalAttrs (nixpkgsName == "unstable"
-      && ((system == "x86_64-linux"  && __elem compiler-nix-name ["ghc8107" "ghc902" "ghc925"])
+      && ((system == "x86_64-linux"  && __elem compiler-nix-name ["ghc8107" "ghc902" "ghc926" "ghc927" "ghc928" "ghc945" "ghc962"])
        || (system == "x86_64-darwin" && __elem compiler-nix-name []))) { # TODO add ghc versions when we have more darwin build capacity
     inherit (lib.systems.examples) mingwW64;
-  } // lib.optionalAttrs (system == "x86_64-linux" && nixpkgsName == "unstable" && __elem compiler-nix-name ["ghc8107" "ghc902" "ghc922" "ghc923" "ghc924" "ghc925"]) {
+  } // lib.optionalAttrs (system == "x86_64-linux" && nixpkgsName == "unstable" && __elem compiler-nix-name ["ghc8107" "ghc902" "ghc922" "ghc923" "ghc924" "ghc926" "ghc927" "ghc928" "ghc945" "ghc962"]) {
     # Musl cross only works on linux
     # aarch64 cross only works on linux
     inherit (lib.systems.examples) musl64 aarch64-multiplatform;
+  } // lib.optionalAttrs (system == "x86_64-linux" && nixpkgsName == "unstable" && __elem compiler-nix-name ["ghc927" "ghc928"]) {
+    # TODO fix this for the compilers we build with hadrian (ghc >=9.4)
+    inherit (lib.systems.examples) aarch64-multiplatform-musl;
+  } // lib.optionalAttrs (system == "aarch64-linux" && nixpkgsName == "unstable" && __elem compiler-nix-name ["ghc927" "ghc928" "ghc945" "ghc962"]) {
+    inherit (lib.systems.examples) aarch64-multiplatform-musl;
   };
   isDisabled = d: d.meta.disabled or false;
 in
@@ -88,11 +99,11 @@ dimension "Nixpkgs version" nixpkgsVersions (nixpkgsName: nixpkgs-pin:
         # TODO: can we merge this into the general case by picking an appropriate "cross system" to mean native?
         native = pkgs.recurseIntoAttrs ({
           roots = pkgs.haskell-nix.roots' compiler-nix-name ifdLevel;
-          ghc = pkgs.buildPackages.haskell-nix.compiler."${compiler-nix-name}";
+          ghc = pkgs.buildPackages.haskell-nix.compiler.${compiler-nix-name};
         } // pkgs.lib.optionalAttrs runTests {
           inherit (build) tests tools maintainer-scripts maintainer-script-cache;
         } // pkgs.lib.optionalAttrs (ifdLevel >= 1) {
-          iserv-proxy = pkgs.ghc-extra-projects."${compiler-nix-name}".getComponent "iserv-proxy:exe:iserv-proxy";
+          inherit (pkgs.haskell-nix.iserv-proxy-exes.${compiler-nix-name}) iserv-proxy;
         } // pkgs.lib.optionalAttrs (ifdLevel >= 3) {
           hello = (pkgs.haskell-nix.hackage-package { name = "hello"; version = "1.0.0.2"; inherit evalPackages compiler-nix-name; }).getComponent "exe:hello";
         });
@@ -104,19 +115,19 @@ dimension "Nixpkgs version" nixpkgsVersions (nixpkgsName: nixpkgs-pin:
             build = import ./build.nix { inherit pkgs evalPackages ifdLevel compiler-nix-name haskellNix; };
         in pkgs.recurseIntoAttrs (pkgs.lib.optionalAttrs (ifdLevel >= 1) ({
             roots = pkgs.haskell-nix.roots' compiler-nix-name ifdLevel;
-            ghc = pkgs.buildPackages.haskell-nix.compiler."${compiler-nix-name}";
+            ghc = pkgs.buildPackages.haskell-nix.compiler.${compiler-nix-name};
             # TODO: look into cross compiling ghc itself
-            # ghc = pkgs.haskell-nix.compiler."${compiler-nix-name}";
+            # ghc = pkgs.haskell-nix.compiler.${compiler-nix-name};
             # TODO: look into making tools work when cross compiling
             # inherit (build) tools;
           } // pkgs.lib.optionalAttrs (runTests && crossSystemName != "aarch64-multiplatform") {
             # Tests are broken on aarch64 cross https://github.com/input-output-hk/haskell.nix/issues/513
             inherit (build) tests;
-        }) // pkgs.lib.optionalAttrs (ifdLevel >= 2 && crossSystemName != "ghcjs") {
-          # GHCJS builds its own template haskell runner.
-          remote-iserv = pkgs.ghc-extra-projects."${compiler-nix-name}".getComponent "remote-iserv:exe:remote-iserv";
-          iserv-proxy = pkgs.ghc-extra-projects."${compiler-nix-name}".getComponent "iserv-proxy:exe:iserv-proxy";
-        } // pkgs.lib.optionalAttrs (ifdLevel >= 3) {
+        })
+        # GHCJS builds its own template haskell runner.
+        // pkgs.lib.optionalAttrs (ifdLevel >= 2 && crossSystemName != "ghcjs")
+            pkgs.haskell-nix.iserv-proxy-exes.${compiler-nix-name}
+        // pkgs.lib.optionalAttrs (ifdLevel >= 3) {
           hello = (pkgs.haskell-nix.hackage-package { name = "hello"; version = "1.0.0.2"; inherit compiler-nix-name; }).getComponent "exe:hello";
         })
       ))

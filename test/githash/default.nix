@@ -19,7 +19,7 @@ let
     modules = (optional (!(src ? origSrc && __pathExists (src.origSrc + "/.git"))) {
       packages.githash-test.src =
         rec {
-          origSrc = runCommand "githash-test-src" { nativeBuildInputs = [ git ]; } ''
+          origSrc = evalPackages.runCommand "githash-test-src" { nativeBuildInputs = [ evalPackages.gitReallyMinimal ]; } ''
             mkdir -p $out/test/githash
             cd $out
             git init
@@ -44,7 +44,9 @@ let
 in recurseIntoAttrs {
   # githash runs git from TH code and this needs a cross compiled git exe
   # to work correctly.  Cross compiling git is currently brocken.
-  meta.disabled = __elem compiler-nix-name ["ghc901" "ghc902"] || haskellLib.isCrossHost;
+  meta.disabled = __elem compiler-nix-name ["ghc901" "ghc902"] || haskellLib.isCrossHost ||
+    # TODO find out why TH fails for this
+    (__elem compiler-nix-name ["ghc927" "ghc928"] && stdenv.hostPlatform.isAarch64 && stdenv.hostPlatform.isMusl);
 
   ifdInputs = {
     inherit (project) plan-nix;

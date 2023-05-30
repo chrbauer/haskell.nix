@@ -3,21 +3,6 @@ final: prev:
   haskell-nix = prev.haskell-nix // ({
     defaultModules = prev.haskell-nix.defaultModules ++ final.lib.optional final.stdenv.hostPlatform.isGhcjs (
       ({ pkgs, buildModules, config, lib, ... }: {
-        # Allow Cabal to be reinstalled so that custom setups will use a Cabal
-        # built with packages.Cabal.patches
-        nonReinstallablePkgs =
-          [ "rts" "ghc-heap" "ghc-prim" "integer-gmp" "integer-simple" "base"
-            "deepseq" "array" "ghc-boot-th" "pretty" "template-haskell"
-            "ghcjs-prim" "ghcjs-th"
-          ]
-          ++ lib.optionals (!config.reinstallableLibGhc) [
-            "ghc-boot"
-            "ghc" "Win32" "array" "binary" "bytestring" "containers"
-            "directory" "filepath" "ghc-boot" "ghc-compact" "ghc-prim"
-            "hpc"
-            "mtl" "parsec" "process" "text" "time" "transformers"
-            "unix" "xhtml" "terminfo"
-          ];
         testWrapper = [((final.writeScriptBin "node-wrapper" ''
           set -euo pipefail
           exe=$1
@@ -27,12 +12,18 @@ final: prev:
 
         # Apply the patches that came with `ghcjs`
         # Also add a "Keep alive" message to prevent hydra timeouts when hsc2hs runs
-        packages = pkgs.lib.genAttrs ["base" "directory" "filepath" "ghc-prim" "integer-gmp" "process" "template-haskell" "time" "unix" "Win32" ]
-          (name: {
+        packages = pkgs.lib.genAttrs (pkgs.lib.optionals (__elem config.compiler.nix-name ["ghc865" "ghc884" "ghc8107"]) ["base" "directory" "filepath" "ghc-prim" "integer-gmp" "process" "template-haskell" "time" "unix" "Win32" ])
+          (name: let
+              ghcjs-src = pkgs.buildPackages.haskell-nix.compiler.${config.compiler.nix-name}.project.configured-src;
+              # This src derivation is needed for the unpatched config.sub file
+              # (the config.sub in the hackage is too old and the one created by autoreconf is too new for the patch).
+              ghcjs-src' = pkgs.buildPackages.haskell-nix.compiler.${config.compiler.nix-name}.configured-src;
+            in {
             components.library.preConfigure = ''
               tr -d '\r' < ${name}.cabal > ${name}.cabal-new
               mv ${name}.cabal-new ${name}.cabal
-              patch -p3 < ${pkgs.buildPackages.haskell-nix.compiler.${config.compiler.nix-name}.project.configured-src}/lib/patches/${name}.patch
+              if [[ -e config.sub ]]; then cp ${ghcjs-src'}/config.sub config.sub; fi
+              patch -p3 < ${ghcjs-src}/lib/patches/${name}.patch
             '';
             components.library.preBuild = ''
               # Avoid timeouts while unix package runs hsc2hs (it does not print anything

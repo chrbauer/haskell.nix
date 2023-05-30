@@ -15,6 +15,7 @@
 , withHoogle ? true
 , withHaddock ? withHoogle
 , exactDeps ? false
+, allToolDeps ? !exactDeps
 , tools ? {}
 , packageSetupDeps ? true
 , enableDWARF ? false
@@ -87,8 +88,9 @@ let
   name = if (mkDrvArgs.name or null) == null then identifierName else mkDrvArgs.name;
 
   # We need to remove any dependencies which would bring in selected components (see above).
-  packageInputs = removeSelectedInputs (lib.concatMap (cfg: cfg.depends) selectedConfigs)
-    ++ additionalPackages;
+  packageInputs = haskellLib.uniqueWithName
+    (removeSelectedInputs (haskellLib.uniqueWithName (lib.concatMap (cfg: cfg.depends) selectedConfigs))
+      ++ additionalPackages);
 
   # Add the system libraries and build tools of the selected haskell packages to the shell.
   # We need to remove any inputs which are selected components (see above).
@@ -97,20 +99,17 @@ let
   #
   # Also, we take care to keep duplicates out of the list, otherwise we may see
   # "Argument list too long" errors from bash when entering a shell.
-  #
-  # Version of `lib.unique` that should be fast if the name attributes are unique
-  uniqueWithName = list:
-    lib.concatMap lib.unique (
-      builtins.attrValues (
-        builtins.groupBy (x: if __typeOf x == "set" then x.name or "noname" else "notset") list));
   allSystemInputs = lib.concatMap (c: c.buildInputs ++ c.propagatedBuildInputs) selectedComponents;
-  systemInputs = removeSelectedInputs (uniqueWithName allSystemInputs);
+  systemInputs = removeSelectedInputs (haskellLib.uniqueWithName allSystemInputs);
 
   nativeBuildInputs = removeSelectedInputs
-    (uniqueWithName (lib.concatMap (c: c.executableToolDepends)
+    (haskellLib.uniqueWithName (lib.concatMap (c: c.executableToolDepends)
       # When not using `exactDeps` cabal may try to build arbitrary dependencies
-      # so in this case we need to provide the build tools for all of hsPkgs:
-      (if exactDeps then selectedComponents else allHsPkgsComponents)));
+      # so in this case we need to provide the build tools for all of `hsPkgs`.
+      # In some cases those tools may be unwanted or broken so the `allToolDeps`
+      # flag can be set to `false` to disable this (stack projects default `allToolDeps`
+      # to `false` as `hsPkgs` for them includes all of stackage):
+      (if exactDeps || !allToolDeps then selectedComponents else allHsPkgsComponents)));
 
   # Set up a "dummy" component to use with ghcForComponent.
   component = {
@@ -141,7 +140,7 @@ let
     # hoogle.nix expects.
     docPackage = p: lib.getOutput "doc" p // {
       pname = p.identifier.name;
-      haddockDir = lib.const p.haddockDir;
+      haddockDir = p.haddockDir;
     };
   in hoogleLocal ({
     packages = map docPackage (haskellLib.flatLibDepends component);
@@ -166,7 +165,7 @@ in
 
     buildInputs = systemInputs
       ++ mkDrvArgs.buildInputs or [];
-    nativeBuildInputs = [ ghcEnv ]
+    nativeBuildInputs = [ ghcEnv.drv ]
       ++ nativeBuildInputs
       ++ mkDrvArgs.nativeBuildInputs or []
       ++ lib.attrValues (buildPackages.haskell-nix.tools' evalPackages compiler.nix-name tools)
@@ -195,12 +194,12 @@ in
 
     # This helps tools like `ghcide` (that use the ghc api) to find
     # the correct global package DB.
-    NIX_GHC_LIBDIR = ghcEnv + "/" + configFiles.libDir;
+    NIX_GHC_LIBDIR = ghcEnv.drv + "/" + configFiles.libDir;
 
     passthru = (mkDrvArgs.passthru or {}) // {
-      ghc = ghcEnv;
-      inherit configFiles;
+      ghc = ghcEnv.drv;
+      configFiles = configFiles.drv;
     };
   } // lib.optionalAttrs exactDeps {
-    CABAL_CONFIG = "${configFiles}/cabal.config";
+    CABAL_CONFIG = "${ghcEnv.drv}/configFiles/cabal.config";
   })

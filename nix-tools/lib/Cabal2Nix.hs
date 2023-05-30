@@ -5,9 +5,10 @@
 
 module Cabal2Nix (cabal2nix, gpd2nix, Src(..), CabalFile(..), CabalFileGenerator(..), cabalFilePath, cabalFilePkgName, CabalDetailLevel(..)) where
 
-import Distribution.PackageDescription.Parsec (readGenericPackageDescription, parseGenericPackageDescription, runParseResult)
+import Distribution.PackageDescription.Parsec (parseGenericPackageDescription, runParseResult)
+import Distribution.Simple.PackageDescription (readGenericPackageDescription)
 import Distribution.Verbosity (normal)
-import Distribution.Pretty (pretty)
+import Distribution.Pretty ( pretty, prettyShow )
 import Distribution.Utils.ShortText (fromShortText)
 import Distribution.Utils.Path (getSymbolicPath)
 import Data.Char (toUpper)
@@ -17,26 +18,19 @@ import Data.Maybe (catMaybes, maybeToList)
 import Data.Foldable (toList)
 import Distribution.Package
          ( packageName, packageVersion )
-import Distribution.Pretty (prettyShow)
 import qualified System.FilePath.Posix as FilePath.Posix
-         ( combine, joinPath, splitDirectories )
+         ( joinPath, splitDirectories )
 import Network.URI
-         ( URI(uriAuthority, uriPath), URIAuth(..), parseURI )
+         ( URI(uriAuthority, uriPath, uriScheme), URIAuth(..), parseURI )
 
 import Distribution.Types.CondTree
 import Distribution.Types.Library
 import Distribution.Types.ForeignLib
 import Distribution.PackageDescription hiding (Git)
-import Distribution.Types.Dependency
-import Distribution.Types.ExeDependency
-import Distribution.Types.LegacyExeDependency
-import Distribution.Types.PkgconfigDependency
-import Distribution.Types.PkgconfigName
 import Distribution.Types.Version
 import Distribution.Types.VersionRange
 import Distribution.CabalSpecVersion
 import Distribution.Compiler
-import Distribution.Types.PackageName (PackageName, mkPackageName, unPackageName)
 import Distribution.Simple.BuildToolDepends (desugarBuildTool)
 import Distribution.ModuleName (ModuleName)
 import qualified Distribution.ModuleName as ModuleName
@@ -45,18 +39,16 @@ import Data.String (fromString, IsString)
 
 -- import Distribution.Types.GenericPackageDescription
 -- import Distribution.Types.PackageDescription
-import Distribution.Types.PackageId
 --import Distribution.Types.Condition
-import Distribution.Types.UnqualComponentName
 import Nix.Expr
 import Data.Fix(Fix(..))
 import Data.Text (Text)
 
-import Cabal2Nix.Util (quoted, selectOr, mkThrow)
+import Cabal2Nix.Util (quoted, selectOr)
 
 data Src
   = Path FilePath
-  | PrivateHackage String
+  | Repo String (Maybe String)
   | Git String String (Maybe String) (Maybe String)
   deriving Show
 
@@ -228,13 +220,36 @@ toNixPackageDescription isLocal detailLevel pd = mkNonRecSet $
 
 srcToNix :: PackageIdentifier -> Src -> NExpr
 srcToNix _ (Path p) = mkRecSet [ "src" $= applyMkDefault (mkRelPath p) ]
-srcToNix pi' (PrivateHackage url)
-  = mkNonRecSet $
-    [ "src" $= applyMkDefault (mkSym pkgs @. "fetchurl" @@ mkNonRecSet
-      [ "url" $= mkStr (fromString . show $ mkPrivateHackageUrl url pi')
-      , "sha256" $= (mkSym "config" @. "sha256")
-      ])
-    ]
+srcToNix pi' (Repo url mHash)
+  = let uri = mkPrivateHackageUrl url pi'
+    in if "file:" == uriScheme uri
+    then 
+      -- It's a file: URL. In principle curl can fetch file URLs, but in 
+      -- practice fetchurl can't. This is (I believe) because the Nix sandbox
+      -- is relaxed to allow fetchurl to access the internet, but _not_ to
+      -- let is access random files, even if it has a hash specified.
+      -- But builtins.path can do that, so we just use that instead.
+      mkNonRecSet
+        [ "src" $= applyMkDefault (mkSym "builtins" @. "path" @@ mkNonRecSet
+          [ "path" $= mkStr (fromString $ uriPath uri)
+          , "sha256" $= case mHash of
+                          Nothing -> mkSym "config" @. "sha256"
+                          Just hash -> mkStr (fromString hash)
+          -- needed for the hash to match what you would use for fetchurl
+          , "recursive" $= mkBool False
+          ])
+        ]
+    else 
+      -- It's some other kind of URL, just use fetchurl and hope curl
+      -- can fetch it.
+      mkNonRecSet
+        [ "src" $= applyMkDefault (mkSym pkgs @. "fetchurl" @@ mkNonRecSet
+          [ "url" $= mkStr (fromString . show $ uri)
+          , "sha256" $= case mHash of
+                          Nothing -> mkSym "config" @. "sha256"
+                          Just hash -> mkStr (fromString hash)
+          ])
+        ]
 srcToNix _ (Git url rev mbSha256 mbPath)
   = mkNonRecSet $
     [ "src" $= applyMkDefault (mkSym pkgs @. "fetchgit" @@ mkNonRecSet

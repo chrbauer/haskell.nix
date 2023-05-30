@@ -1,4 +1,4 @@
-{ pkgs, stdenv, buildPackages, ghc, lib, gobject-introspection ? null, haskellLib, makeConfigFiles, haddockBuilder, ghcForComponent, hsPkgs, compiler, runCommand, libffi, gmp, zlib, ncurses, nodejs }@defaults:
+{ pkgs, stdenv, buildPackages, ghc, lib, gobject-introspection ? null, haskellLib, makeConfigFiles, haddockBuilder, ghcForComponent, hsPkgs, compiler, runCommand, libffi, gmp, windows, zlib, ncurses, nodejs, nonReinstallablePkgs }@defaults:
 lib.makeOverridable (
 let self =
 { componentId
@@ -8,13 +8,13 @@ let self =
 , setup
 , src
 , flags
-, revision
 , cabalFile
 , cabal-generator
 , patches ? []
 
 , preUnpack ? component.preUnpack, postUnpack ? component.postUnpack
 , configureFlags ? component.configureFlags
+, prePatch ? component.prePatch, postPatch ? component.postPatch
 , preConfigure ? component.preConfigure, postConfigure ? component.postConfigure
 , setupBuildFlags ? []
 , preBuild ? component.preBuild , postBuild ? component.postBuild
@@ -43,9 +43,6 @@ let self =
 
 , enableStatic ? component.enableStatic
 , enableShared ? ghc.enableShared && component.enableShared && !haskellLib.isCrossHost
-               # on x86 we'll use shared libraries, even with musl m(
-               # ghc's internal linker seems to be broken on x86.
-               && !(stdenv.hostPlatform.isMusl && !stdenv.hostPlatform.isx86)
 , enableDeadCodeElimination ? component.enableDeadCodeElimination
 , writeHieFiles ? component.writeHieFiles
 
@@ -57,6 +54,15 @@ let self =
 , doHoogle ? component.doHoogle # Also build a hoogle index
 , hyperlinkSource ? component.doHyperlinkSource # Link documentation to the source code
 , quickjump ? component.doQuickjump # Generate an index for interactive documentation navigation
+
+# Keep the configFiles as a derivation output (otherwise they are in a temp directory)
+# We need this for `cabal-doctest` to work, but it is also likely
+, keepConfigFiles ? component.keepConfigFiles || configureAllComponents
+
+# Keep the ghc wrapper as a `ghc` derivation output (otherwise it is in a temp directory)
+# This is used for the `ghc-paths` package in `modules/configuration.nix`
+, keepGhc ? component.keepGhc
+
 , keepSource ? component.keepSource || configureAllComponents # Build from `source` output in the store then delete `dist`
 , setupHaddockFlags ? component.setupHaddockFlags
 
@@ -82,7 +88,7 @@ let self =
 , enableTSanRTS ? false
 
 # LLVM
-, useLLVM ? ghc.useLLVM
+, useLLVM ? ghc.useLLVM or false
 , smallAddressSpace ? false
 
 }@drvArgs:
@@ -162,34 +168,22 @@ let
       if configureAllComponents
         then ["--enable-tests" "--enable-benchmarks"]
         else ["${haskellLib.componentTarget componentId}"]
-    ) ++ [ "$(cat ${configFiles}/configure-flags)"
+    ) ++ [ "$(cat $configFiles/configure-flags)"
     ] ++ commonConfigureFlags);
-
-  # From nixpkgs 20.09, the pkg-config exe has a prefix matching the ghc one
-  pkgConfigHasPrefix = builtins.compareVersions lib.version "20.09pre" >= 0;
 
   commonConfigureFlags = ([
       # GHC
       "--with-ghc=${ghc.targetPrefix}ghc"
       "--with-ghc-pkg=${ghc.targetPrefix}ghc-pkg"
       "--with-hsc2hs=${ghc.targetPrefix}hsc2hs"
-    ] ++ lib.optional (pkgConfigHasPrefix && pkgconfig != [])
-      "--with-pkg-config=${ghc.targetPrefix}pkg-config"
+    ] ++ lib.optional (pkgconfig != [])
+      "--with-pkg-config=${buildPackages.cabalPkgConfigWrapper.targetPrefix}pkg-config"
       ++ lib.optionals (stdenv.hasCC or (stdenv.cc != null))
     ( # CC
       [ "--with-gcc=${stdenv.cc.targetPrefix}cc"
       ] ++
       # BINTOOLS
-      (if stdenv.hostPlatform.isLinux && !stdenv.hostPlatform.isAndroid # might be better check to see if cc is clang/llvm?
-        # use gold as the linker on linux to improve link times
-        then [
-          "--with-ld=${stdenv.cc.bintools.targetPrefix}ld.gold"
-          "--ghc-option=-optl-fuse-ld=gold"
-          "--ld-option=-fuse-ld=gold"
-        ] else [
-          "--with-ld=${stdenv.cc.bintools.targetPrefix}ld"
-        ]
-      ) ++ [
+       [
         "--with-ar=${stdenv.cc.bintools.targetPrefix}ar"
         "--with-strip=${stdenv.cc.bintools.targetPrefix}strip"
       ]
@@ -215,7 +209,11 @@ let
       ++ lib.optional stdenv.hostPlatform.isLinux (enableFeature enableDeadCodeElimination "split-sections")
       ++ lib.optionals haskellLib.isCrossHost (
         map (arg: "--hsc2hs-option=" + arg) (["--cross-compile"] ++ lib.optionals (stdenv.hostPlatform.isWindows) ["--via-asm"])
-        ++ lib.optional (package.buildType == "Configure") "--configure-option=--host=${stdenv.hostPlatform.config}" )
+        ++ lib.optional (package.buildType == "Configure") "--configure-option=--host=${
+           # Older ghcjs patched config.sub to support "js-unknown-ghcjs" (not "javascript-unknown-ghcjs")
+           if stdenv.hostPlatform.isGhcjs && builtins.compareVersions defaults.ghc.version "9" < 0
+             then "js-unknown-ghcjs"
+             else stdenv.hostPlatform.config}" )
       ++ configureFlags
       ++ (ghc.extraConfigureFlags or [])
       ++ lib.optional enableDebugRTS "--ghc-option=-debug"
@@ -246,12 +244,12 @@ let
         && x.identifier.name or "" != "hsc2hs")
       (map
         (p: if builtins.isFunction p
-          then p { inherit  (package.identifier) version; inherit revision; }
+          then p { inherit  (package.identifier) version; }
           else p) build-tools))) ++
     lib.optional (pkgconfig != []) buildPackages.cabalPkgConfigWrapper;
 
   # Unfortunately, we need to wrap ghc commands for cabal builds to
-  # work in the nix-shell. See ../doc/removing-with-package-wrapper.md.
+  # work in the nix-shell. See ../docs/dev/removing-with-package-wrapper.md.
   shellWrappers = ghcForComponent {
     componentName = fullName;
     inherit configFiles enableDWARF;
@@ -279,6 +277,9 @@ let
 
       SETUP_HS = setup + /bin/Setup;
 
+      inherit cabalFile;
+      passAsFile = [ "cabalFile" ];
+
       prePatch =
         # If the package is in a sub directory `cd` there first.
         # In some cases the `cleanSrc.subDir` will be empty and the `.cabal`
@@ -292,34 +293,38 @@ let
           ''
         ) +
         (if cabalFile != null
-          then ''cat ${cabalFile} > ${package.identifier.name}.cabal''
+          then ''cp -v $cabalFilePath ${package.identifier.name}.cabal''
           else
             # When building hpack package we use the internal nix-tools
             # (compiled with a fixed GHC version)
             lib.optionalString (cabal-generator == "hpack") ''
               ${buildPackages.haskell-nix.internal-nix-tools}/bin/hpack
             ''
-        );
+        ) + lib.optionalString (prePatch != null) "\n${prePatch}";
     }
-    # patches can (if they like) depend on the version and revision of the package.
+    # patches can (if they like) depend on the version of the package.
     // lib.optionalAttrs (patches != []) {
       patches = map (p:
         if builtins.isFunction p
-          then p { inherit (package.identifier) version; inherit revision; }
+          then p { inherit (package.identifier) version; }
           else p
         ) patches;
     }
     // haskellLib.optionalHooks {
       # These are hooks are needed to set up the source for building and running haddock
-      inherit preUnpack postUnpack preConfigure postConfigure;
+      inherit preUnpack postUnpack postPatch preConfigure postConfigure;
     }
     // lib.optionalAttrs (stdenv.buildPlatform.libc == "glibc") {
       LOCALE_ARCHIVE = "${buildPackages.glibcLocales}/lib/locale/locale-archive";
+    }
+    // lib.optionalAttrs stdenv.hostPlatform.isMusl {
+      # This fixes musl compilation of TH code that depends on C++ (for instance TH code that uses the double-conversion package)
+      LD_LIBRARY_PATH="${pkgs.buildPackages.gcc-unwrapped.lib}/x86_64-unknown-linux-musl/lib";
     };
 
   haddock = haddockBuilder {
     inherit componentId component package flags commonConfigureFlags
-      commonAttrs revision doHaddock
+      commonAttrs doHaddock
       doHoogle hyperlinkSource quickjump setupHaddockFlags
       needsProfiling configFiles preHaddock postHaddock pkgconfig;
 
@@ -346,9 +351,14 @@ let
       config = component;
       srcSubDir = cleanSrc.subDir;
       srcSubDirPath = cleanSrc.root + cleanSrc.subDir;
-      inherit configFiles executableToolDepends exeName enableDWARF;
+      inherit executableToolDepends exeName enableDWARF;
       exePath = drv + "/bin/${exeName}";
-      env = shellWrappers;
+      env = shellWrappers.drv;
+      shell = drv.overrideAttrs (attrs: {
+        pname = nameOnly + "-shell";
+        inherit (package.identifier) version;
+        nativeBuildInputs = [shellWrappers.drv] ++ attrs.nativeBuildInputs;
+      });
       profiled = self (drvArgs // { enableLibraryProfiling = true; });
       dwarf = self (drvArgs // { enableDWARF = true; });
     } // lib.optionalAttrs (haskellLib.isLibrary componentId) ({
@@ -375,24 +385,29 @@ let
       mainProgram = exeName;
     };
 
-    propagatedBuildInputs =
-         frameworks # Frameworks will be needed at link time
+    propagatedBuildInputs = haskellLib.checkUnique "${ghc.targetPrefix}${fullName} propagatedBuildInputs" (
+         haskellLib.uniqueWithName frameworks # Frameworks will be needed at link time
       # Not sure why pkgconfig needs to be propagatedBuildInputs but
       # for gi-gtk-hs it seems to help.
-      ++ map pkgs.lib.getDev (builtins.concatLists pkgconfig)
+      ++ haskellLib.uniqueWithName (map pkgs.lib.getDev (builtins.concatLists pkgconfig))
+      # These only need to be propagated for library components (otherwise they
+      # will be in `buildInputs`)
+      ++ lib.optionals (haskellLib.isLibrary componentId) configFiles.libDeps # libDeps is already deduplicated
       ++ lib.optionals (stdenv.hostPlatform.isWindows)
-        (lib.flatten component.libs
-        ++ map haskellLib.dependToLib component.depends);
+        (haskellLib.uniqueWithName (lib.flatten component.libs)));
 
-    buildInputs = lib.optionals (!stdenv.hostPlatform.isWindows)
-      (lib.flatten component.libs
-      ++ map haskellLib.dependToLib component.depends);
+    buildInputs = haskellLib.checkUnique "${ghc.targetPrefix}${fullName} buildInputs" (
+      lib.optionals (!haskellLib.isLibrary componentId) configFiles.libDeps # libDeps is already deduplicated
+      ++ lib.optionals (!stdenv.hostPlatform.isWindows)
+        (haskellLib.uniqueWithName (lib.flatten component.libs)));
 
     nativeBuildInputs =
-      [shellWrappers buildPackages.removeReferencesTo]
+      [ghc buildPackages.removeReferencesTo]
       ++ executableToolDepends;
 
-    outputs = ["out" ]
+    outputs = ["out"]
+      ++ (lib.optional keepConfigFiles "configFiles")
+      ++ (lib.optional keepGhc "ghc")
       ++ (lib.optional enableSeparateDataOutput "data")
       ++ (lib.optional keepSource "source")
       ++ (lib.optional writeHieFiles "hie");
@@ -411,7 +426,32 @@ let
         chmod -R +w .
       '') + commonAttrs.prePatch;
 
-    configurePhase = ''
+    configurePhase =
+      (
+        if keepConfigFiles then ''
+          mkdir -p $configFiles
+        ''
+        else ''
+          configFiles=$(mktemp -d)
+        ''
+      ) + (
+        if keepGhc then ''
+          mkdir -p $ghc
+        ''
+        else ''
+          ghc=$(mktemp -d)
+        ''
+      ) + ''
+      wrappedGhc=$ghc
+      ${configFiles.script}
+      ${shellWrappers.script}
+    ''
+    # Remove any ghc docs pages so nixpkgs does not include them in $out
+    # (this can result in unwanted dependencies on GHC)
+    + ''
+      rm -rf $wrappedGhc/share/doc $wrappedGhc/share/man $wrappedGhc/share/devhelp/books
+      PATH=$wrappedGhc/bin:$PATH
+
       runHook preConfigure
       echo Configure flags:
       printf "%q " ${finalConfigureFlags}
@@ -492,7 +532,7 @@ let
       ${lib.optionalString (haskellLib.isLibrary componentId) ''
         $SETUP_HS register --gen-pkg-config=${name}.conf
         ${ghc.targetPrefix}ghc-pkg -v0 init $out/package.conf.d
-        ${ghc.targetPrefix}ghc-pkg -v0 --package-db ${configFiles}/${configFiles.packageCfgDir} -f $out/package.conf.d register ${name}.conf
+        ${ghc.targetPrefix}ghc-pkg -v0 --package-db $configFiles/${configFiles.packageCfgDir} -f $out/package.conf.d register ${name}.conf
 
         mkdir -p $out/exactDep
         touch $out/exactDep/configure-flags
@@ -524,6 +564,7 @@ let
               if id=$(${target-pkg-and-db} field "z-${package.identifier.name}-z-*" id --simple-output); then
                 name=$(${target-pkg-and-db} field "z-${package.identifier.name}-z-*" name --simple-output)
                 echo "--dependency=''${name#z-${package.identifier.name}-z-}=$id" >> $out/exactDep/configure-flags
+                echo "package-id $id" >> $out/envDep
                 ''
                 # Allow `package-name:sublib-name` to work in `build-depends`
                 # by adding the same `--dependency` again, but with the package
@@ -556,7 +597,10 @@ let
       '')
       + (lib.optionalString (stdenv.hostPlatform.isWindows && (haskellLib.mayHaveExecutable componentId)) (''
         echo "Symlink libffi and gmp .dlls ..."
-        for p in ${lib.concatStringsSep " " [ libffi gmp ]}; do
+        for p in ${lib.concatStringsSep " " ([ libffi gmp ] ++
+              # Also include C++ and mcfgthreads DLLs for GHC 9.4.1 and newer
+              lib.optionals (builtins.compareVersions defaults.ghc.version "9.4.1" >= 0)
+                [ buildPackages.gcc-unwrapped windows.mcfgthreads ])}; do
           find "$p" -iname '*.dll' -exec ln -s {} $out/bin \;
         done
         ''
@@ -616,7 +660,7 @@ let
     '';
 
     shellHook = ''
-      export PATH="${shellWrappers}/bin:$PATH"
+      export PATH=$ghc/bin:$PATH
       ${shellHookApplied}
     '';
   }

@@ -4,7 +4,6 @@
 , component
 , package
 , flags
-, revision
 , commonAttrs
 , preHaddock
 , postHaddock
@@ -47,7 +46,7 @@ let
   finalConfigureFlags = lib.concatStringsSep " " (
     [ "--prefix=${componentDrv}"
       "${haskellLib.componentTarget componentId}"
-      "$(cat ${docsConfigFiles}/configure-flags)"
+      "$(cat $configFiles/configure-flags)"
     ]
     ++ commonConfigureFlags
     ++ lib.optional doHaddock' " --docdir=${docdir "$doc"}");
@@ -63,28 +62,33 @@ let
     name = fullName;
 
     passthru = {
-      configFiles = docsConfigFiles;
-
       # The directory containing the haddock documentation.
-      haddockDir = if doHaddock' then "${docdir drv.doc}/html" else null;
+      haddockDir = lib.const (if doHaddock' then "${docdir drv.doc}/html" else null);
     };
 
     # `out` contains the `package.conf.d` files used for building the
     # haddock files.
     # `doc` contains just the haddock output files.
-    outputs = ["out"]
+    outputs = ["out" "configFiles" "ghc"]
     ++ lib.optional doHaddock' "doc";
 
-    propagatedBuildInputs = builtins.concatLists pkgconfig;
+    propagatedBuildInputs = haskellLib.checkUnique "${fullName} propagatedBuildInputs" (
+         haskellLib.uniqueWithName (map lib.getDev (builtins.concatLists pkgconfig))
+      ++ configFiles.libDeps); # libDeps is already deduplicated
 
-    buildInputs = component.libs
-      ++ map (d: d.components.library.haddock or d) component.depends;
+    buildInputs = haskellLib.uniqueWithName (lib.flatten component.libs);
 
     nativeBuildInputs =
-      [ shellWrappers buildPackages.removeReferencesTo ]
+      [ ghc buildPackages.removeReferencesTo ]
       ++ componentDrv.executableToolDepends;
 
     configurePhase = ''
+      mkdir -p $configFiles
+      mkdir -p $ghc
+      wrappedGhc=$ghc
+      ${docsConfigFiles.script}
+      ${shellWrappers.script}
+      PATH=$wrappedGhc/bin:$PATH
       runHook preConfigure
       echo Configure flags:
       printf "%q " ${finalConfigureFlags}
@@ -145,7 +149,7 @@ let
           # working hyper links.
           pkg=$(basename "$i")
           sed -e "s|haddock-interfaces:.*|haddock-interfaces: $docdir/html/${componentId.cname}.haddock|" -e "s|haddock-html:.*|haddock-html: $docdir/html/|" "$i" > "$pkg"
-          ${ghc.targetPrefix}ghc-pkg -v0 --package-db ${docsConfigFiles}/${configFiles.packageCfgDir} -f $out/package.conf.d register "$pkg"
+          ${ghc.targetPrefix}ghc-pkg -v0 --package-db $configFiles/${configFiles.packageCfgDir} -f $out/package.conf.d register "$pkg"
         done
 
         ln -s ${componentDrv}/exactDep $out/exactDep

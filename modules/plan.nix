@@ -168,6 +168,18 @@ let
       default = (def.profilingDetail or "default");
     };
 
+    keepConfigFiles = mkOption {
+      type = bool;
+      default = (def.keepConfigFiles or false);
+      description = "Keep component configFiles in the store in a `configFiles` output";
+    };
+
+    keepGhc = mkOption {
+      type = bool;
+      default = (def.keepGhc or false);
+      description = "Keep component wrapped ghc in the store in a `ghc` output";
+    };
+
     keepSource = mkOption {
       type = bool;
       default = (def.keepSource or false);
@@ -188,6 +200,14 @@ let
     postUnpack = mkOption {
       type = nullOr uniqueStr;
       default = getDefaultOrNull def "postUnpack";
+    };
+    prePatch = mkOption {
+      type = nullOr uniqueStr;
+      default = getDefaultOrNull def "prePatch";
+    };
+    postPatch = mkOption {
+      type = nullOr uniqueStr;
+      default = getDefaultOrNull def "postPatch";
     };
     preConfigure = mkOption {
       type = nullOr uniqueStr;
@@ -302,6 +322,8 @@ in {
 
     evalPackages = mkOption {
       type = unspecified;
+      default = pkgs.pkgsBuildBuild;
+      defaultText = "pkgs.pkgsBuildBuild";
       description = ''
         The `evalPackages` that will be used when building `hoogle` and shell tools.
       '';
@@ -316,7 +338,8 @@ in {
               then (abort "${name} has no revision!")
               else revision (modArgs // { hsPkgs = hsPkgs // (mapAttrs (l: _: hsPkgs.${name}.components.sublibs.${l}) (m.components.sublibs or {})); });
       in
-        m // { flags = lib.mapAttrs (_: lib.mkDefault) (m.flags // revArgs.flags or {}); }
+        m // { flags = lib.mapAttrs (_: lib.mkDefault) (m.flags // revArgs.flags or {});
+             }
     ) (lib.filterAttrs (n: v: v == null || v.revision != null ) module.packages);
   };
 }

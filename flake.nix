@@ -7,13 +7,11 @@
     nixpkgs-2105 = { url = "github:NixOS/nixpkgs/nixpkgs-21.05-darwin"; };
     nixpkgs-2111 = { url = "github:NixOS/nixpkgs/nixpkgs-21.11-darwin"; };
     nixpkgs-2205 = { url = "github:NixOS/nixpkgs/nixpkgs-22.05-darwin"; };
+    nixpkgs-2211 = { url = "github:NixOS/nixpkgs/nixpkgs-22.11-darwin"; };
     nixpkgs-unstable = { url = "github:NixOS/nixpkgs/nixpkgs-unstable"; };
-    flake-compat = { url = "github:input-output-hk/flake-compat"; flake = false; };
-    flake-utils = { url = "github:numtide/flake-utils"; };
-    tullia = {
-      url = "github:input-output-hk/tullia";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
+    flake-compat = { url = "github:input-output-hk/flake-compat/hkm/gitlab-fix"; flake = false; };
+    flake-utils = { url = "github:hamishmack/flake-utils/hkm/nested-hydraJobs"; };
+    "hls-1.10" = { url = "github:haskell/haskell-language-server/1.10.0.0"; flake = false; };
     hydra.url = "hydra";
     hackage = {
       url = "github:input-output-hk/hackage.nix";
@@ -58,12 +56,28 @@
       url = "github:phadej/HTTP";
       flake = false;
     };
+    iserv-proxy = {
+      type = "git";
+      url = "https://gitlab.haskell.org/hamishmack/iserv-proxy.git";
+      ref = "hkm/remote-iserv";
+      flake = false;
+    };
   };
 
-  outputs = { self, nixpkgs, nixpkgs-unstable, nixpkgs-2105, nixpkgs-2111, nixpkgs-2205, flake-utils, tullia, ... }@inputs:
-    let compiler = "ghc925";
+  outputs = { self, nixpkgs, nixpkgs-unstable, nixpkgs-2105, nixpkgs-2111, nixpkgs-2205, nixpkgs-2211, flake-utils, ... }@inputs:
+    let compiler = "ghc928";
       config = import ./config.nix;
-    in {
+
+      traceNames = prefix: builtins.mapAttrs (n: v:
+        if builtins.isAttrs v
+          then if v ? type && v.type == "derivation"
+            then __trace (prefix + n) v
+            else traceNames (prefix + n + ".") v
+          else v);
+
+      traceHydraJobs = x: x // { inherit (traceNames "" x) hydraJobs; };
+
+    in traceHydraJobs ({
       inherit config;
       overlay = self.overlays.combined;
       overlays = import ./overlays { sources = inputs; };
@@ -108,6 +122,8 @@
               (nixpkgsArgs // { localSystem = { inherit system; }; });
             pkgs-2205 = import nixpkgs-2205
               (nixpkgsArgs // { localSystem = { inherit system; }; });
+            pkgs-2211 = import nixpkgs-2211
+              (nixpkgsArgs // { localSystem = { inherit system; }; });
             pkgs-unstable = import nixpkgs-unstable
               (nixpkgsArgs // { localSystem = { inherit system; }; });
             hix = import ./hix/default.nix { inherit pkgs; };
@@ -138,16 +154,19 @@
 
       packages = ((self.internal.compat { inherit system; }).hix).apps;
 
-      ciJobs =
+      allJobs =
         let
-          inherit (legacyPackages) lib;
           inherit (import ./ci-lib.nix { pkgs = legacyPackagesUnstable; }) stripAttrsForHydra filterDerivations;
           ci = import ./ci.nix { inherit (self.internal) compat; inherit system; };
-          allJobs = stripAttrsForHydra (filterDerivations ci);
+        in stripAttrsForHydra (filterDerivations ci);
+
+      requiredJobs =
+        let
+          inherit (legacyPackages) lib;
           names = x: lib.filter (n: n != "recurseForDerivations" && n != "meta")
               (builtins.attrNames x);
-          requiredJobs =
-            builtins.listToAttrs (
+        in
+          builtins.listToAttrs (
               lib.concatMap (nixpkgsVer:
                 let nixpkgsJobs = allJobs.${nixpkgsVer};
                 in lib.concatMap (compiler-nix-name:
@@ -163,11 +182,8 @@
                    }) (names ghcJobs))
                 ) (names nixpkgsJobs)
               ) (names allJobs));
-        in {
-          latest = allJobs.unstable.ghc8107.native or {};
-        } // requiredJobs;
 
-      hydraJobs = ciJobs;
+      hydraJobs = allJobs;
 
       devShells = with self.legacyPackages.${system}; {
         default =
@@ -194,7 +210,7 @@
             "ghc8101" "ghc8102" "ghc8103" "ghc8104" "ghc8105" "ghc8106" "ghc810420210212"
             "ghc901"
             "ghc921" "ghc922" "ghc923"]);
-    } // tullia.fromSimple system (import ./tullia.nix self system));
+    }));
 
   # --- Flake Local Nix Configuration ----------------------------
   nixConfig = {

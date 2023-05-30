@@ -1,14 +1,17 @@
 { pkgs, runCommand, cacert, index-state-hashes, haskellLib }@defaults:
 let readIfExists = src: fileName:
       # Using origSrcSubDir bypasses any cleanSourceWith.
+      # `lookForCabalProject` allows us to avoid looking in source from hackage
+      # for cabal.project files.  It is set in `modules/hackage-project.nix`.
       let origSrcDir = src.origSrcSubDir or src;
       in
-        if builtins.elem ((__readDir origSrcDir)."${fileName}" or "") ["regular" "symlink"]
+        if (src.lookForCabalProject or true) && builtins.elem ((__readDir origSrcDir)."${fileName}" or "") ["regular" "symlink"]
           then __readFile (origSrcDir + "/${fileName}")
           else null;
 in
 { name          ? src.name or null # optional name for better error messages
 , src
+, materialized-dir ? ../materialized
 , compiler-nix-name    # The name of the ghc compiler to use eg. "ghc884"
 , index-state   ? null # Hackage index-state, eg. "2019-10-10T00:00:00Z"
 , index-sha256  ? null # The hash of the truncated hackage index-state
@@ -20,6 +23,7 @@ in
 , cabalProjectLocal    ? readIfExists src "${cabalProjectFileName}.local"
 , cabalProjectFreeze   ? readIfExists src "${cabalProjectFileName}.freeze"
 , caller               ? "callCabalProjectToNix" # Name of the calling function for better warning messages
+, compilerSelection    ? p: p.haskell-nix.compiler
 , ghc           ? null # Deprecated in favour of `compiler-nix-name`
 , ghcOverride   ? null # Used when we need to set ghc explicitly during bootstrapping
 , configureArgs ? "" # Extra arguments to pass to `cabal v2-configure`.
@@ -66,9 +70,9 @@ in
                             # any plutus-apps input being used for a
                             # package.
 , evalPackages
+, supportHpack ? false      # Run hpack on package.yaml files with no .cabal file
 , ...
 }@args:
-
 let
   inherit (evalPackages.haskell-nix) materialize dotCabal;
 
@@ -104,14 +108,9 @@ let
               #
               # > The option `packages.Win32.package.identifier.name' is used but not defined.
               #
-              pkgs.haskell-nix.compiler."${compiler-nix-name}";
+              (compilerSelection pkgs)."${compiler-nix-name}";
 
-in
-  assert (if ghc'.isHaskellNixCompiler or false then true
-    else throw ("It is likely you used `haskell.compiler.X` instead of `haskell-nix.compiler.X`"
-      + forName));
-
-let
+in let
   ghc = ghc';
   subDir' = src.origSubDir or "";
   subDir = pkgs.lib.strings.removePrefix "/" subDir';
@@ -154,46 +153,29 @@ let
     }
   '';
 
-  cabalProjectIndexState = pkgs.haskell-nix.haskellLib.parseIndexState rawCabalProject;
-
-  index-state-found =
+  index-state-max =
     if index-state != null
     then index-state
-    else if cabalProjectIndexState != null
-    then cabalProjectIndexState
-    else
-      let latest-index-state = pkgs.lib.last (builtins.attrNames index-state-hashes);
-      in builtins.trace ("No index state specified" + (if name == null then "" else " for " + name) + ", using the latest index state that we know about (${latest-index-state})!") latest-index-state;
-
-  index-state-pinned = index-state != null || cabalProjectIndexState != null;
+    else pkgs.lib.last (builtins.attrNames index-state-hashes);
 
   pkgconfPkgs = import ./pkgconf-nixpkgs-map.nix pkgs;
 
-in
-  assert (if index-state-found == null
-    then throw "No index state passed and none found in ${cabalProjectFileName}" else true);
-
-  assert (if index-sha256 == null && !(pkgs.lib.hasSuffix "Z" index-state-found)
-    then throw "Index state found was ${index-state-found} and no `index-sha256` was provided. "
-      "The index hash lookup code requires zulu time zone (ends in a Z)" else true);
-
-let
   # If a hash was not specified find a suitable cached index state to
   # use that will contain all the packages we need.  By using the
   # first one after the desired index-state we can avoid recalculating
   # when new index-state-hashes are added.
   # See https://github.com/input-output-hk/haskell.nix/issues/672
   cached-index-state = if index-sha256 != null
-    then index-state-found
+    then index-state-max
     else
       let
         suitable-index-states =
           builtins.filter
-            (s: s >= index-state-found) # This compare is why we need zulu time
+            (s: s >= index-state-max) # This compare is why we need zulu time
             (builtins.attrNames index-state-hashes);
       in
         if builtins.length suitable-index-states == 0
-          then index-state-found
+          then index-state-max
           else pkgs.lib.head suitable-index-states;
 
   # Lookup hash for the index state we found
@@ -203,7 +185,7 @@ let
 
 in
   assert (if index-sha256-found == null
-    then throw "Unknown index-state ${index-state-found}, the latest index-state I know about is ${pkgs.lib.last (builtins.attrNames index-state-hashes)}. You may need to update to a newer hackage.nix." else true);
+    then throw "Unknown index-state ${index-state-max}, the latest index-state I know about is ${pkgs.lib.last (builtins.attrNames index-state-hashes)}. You may need to update to a newer hackage.nix." else true);
 
 let
   # Deal with source-repository-packages in a way that will work in
@@ -224,8 +206,8 @@ let
               then inputMap."${repoData.url}/${repoData.rev or repoData.ref}"
             else if inputMap ? ${repoData.url}
               then
-                (if inputMap.${repoData.url}.rev != repoData.ref
-                  then throw "${inputMap.${repoData.url}.rev} may not match ${repoData.ref} for ${repoData.url} use \"${repoData.url}/${repoData.ref}\" as the inputMap key if ${repoData.ref} is a branch or tag that points to ${inputMap.${repoData.url}.rev}."
+                (if inputMap.${repoData.url}.rev != (repoData.rev or repoData.ref)
+                  then throw "${inputMap.${repoData.url}.rev} may not match ${repoData.rev or repoData.ref} for ${repoData.url} use \"${repoData.url}/${repoData.rev or repoData.ref}\" as the inputMap key if ${repoData.rev or repoData.ref} is a branch or tag that points to ${inputMap.${repoData.url}.rev}."
                   else inputMap.${repoData.url})
             else if repoData.sha256 != null
             then fetchgit { inherit (repoData) url sha256; rev = repoData.rev or repoData.ref; }
@@ -315,73 +297,7 @@ let
 
   fixedProject = replaceSourceRepos rawCabalProject;
 
-  # The use of the actual GHC can cause significant problems:
-  # * For hydra to assemble a list of jobs from `components.tests` it must
-  #   first have GHC that will be used. If a patch has been applied to the
-  #   GHC to be used it must be rebuilt before the list of jobs can be assembled.
-  #   If a lot of different GHCs are being tests that can be a lot of work all
-  #   happening in the eval stage where little feedback is available.
-  # * Once the jobs are running the compilation of the GHC needed (the eval
-  #   stage already must have done it, but the outputs there are apparently
-  #   not added to the cache) happens inside the IFD part of cabalProject.
-  #   This causes a very large amount of work to be done in the IFD and our
-  #   understanding is that this can cause problems on nix and/or hydra.
-  # * When using cabalProject we cannot examine the properties of the project without
-  #   building or downloading the GHC (less of an issue as we would normally need
-  #   it soon anyway).
-  #
-  # The solution here is to capture the GHC outputs that `cabal v2-configure`
-  # requests and materialize it so that the real GHC is only needed
-  # when `checkMaterialization` is set.
-  dummy-ghc-data =
-    let
-      materialized = ../materialized/dummy-ghc + "/${ghc.targetPrefix}${ghc.name}-${pkgs.stdenv.buildPlatform.system}"
-        + pkgs.lib.optionalString (builtins.compareVersions ghc.version "8.10" < 0 && ghc.targetPrefix == "" && builtins.compareVersions pkgs.lib.version "22.05" < 0) "-old";
-    in pkgs.haskell-nix.materialize ({
-      sha256 = null;
-      sha256Arg = "sha256";
-      materialized = if __pathExists materialized
-        then materialized
-        else __trace "WARNING: No materialized dummy-ghc-data.  mkdir ${toString materialized}"
-          null;
-      reasonNotSafe = null;
-    } // pkgs.lib.optionalAttrs (checkMaterialization != null) {
-      inherit checkMaterialization;
-    }) (
-  runCommand ("dummy-data-" + ghc.name) {
-    nativeBuildInputs = [ ghc ];
-  } ''
-    mkdir -p $out/ghc
-    mkdir -p $out/ghc-pkg
-    ${ghc.targetPrefix}ghc --version > $out/ghc/version
-    ${ghc.targetPrefix}ghc --numeric-version > $out/ghc/numeric-version
-    ${ghc.targetPrefix}ghc --info | grep -v /nix/store > $out/ghc/info
-    ${ghc.targetPrefix}ghc --supported-languages > $out/ghc/supported-languages
-    ${ghc.targetPrefix}ghc-pkg --version > $out/ghc-pkg/version
-    ${pkgs.lib.optionalString (ghc.targetPrefix == "js-unknown-ghcjs-") ''
-      ${ghc.targetPrefix}ghc --numeric-ghc-version > $out/ghc/numeric-ghc-version
-      ${ghc.targetPrefix}ghc --numeric-ghcjs-version > $out/ghc/numeric-ghcjs-version
-      ${ghc.targetPrefix}ghc-pkg --numeric-ghcjs-version > $out/ghc-pkg/numeric-ghcjs-version
-    ''}
-    # The order of the `ghc-pkg dump` output seems to be non
-    # deterministic so we need to sort it so that it is always
-    # the same.
-    # Sort the output by spliting it on the --- separator line,
-    # sorting it, adding the --- separators back and removing the
-    # last line (the trailing ---)
-    ${ghc.targetPrefix}ghc-pkg dump --global -v0 \
-      | grep -v /nix/store \
-      | grep -v '^abi:' \
-      | tr '\n' '\r' \
-      | sed -e 's/\r\r*/\r/g' \
-      | sed -e 's/\r$//g' \
-      | sed -e 's/\r---\r/\n/g' \
-      | sort \
-      | sed -e 's/$/\r---/g' \
-      | tr '\r' '\n' \
-      | sed -e '$ d' \
-        > $out/ghc-pkg/dump-global
-  '');
+  inherit (ghc) dummy-ghc-data;
 
   # Dummy `ghc` that uses the captured output
   dummy-ghc = evalPackages.writeTextFile {
@@ -461,15 +377,14 @@ let
     sha256 = plan-sha256;
     sha256Arg = "plan-sha256";
     this = "project.plan-nix" + (if name != null then " for ${name}" else "");
-    # Before pinning stuff down we need an index state to use
-    reasonNotSafe =
-      if !index-state-pinned
-        then "index-state is not pinned by an argument or the cabal project file"
-        else null;
   } // pkgs.lib.optionalAttrs (checkMaterialization != null) {
     inherit checkMaterialization;
   }) (evalPackages.runCommand (nameAndSuffix "plan-to-nix-pkgs") {
-    nativeBuildInputs = [ nix-tools dummy-ghc dummy-ghc-pkg cabal-install evalPackages.rsync evalPackages.gitMinimal evalPackages.allPkgConfigWrapper ];
+    nativeBuildInputs = [
+      nix-tools.exes.make-install-plan
+      nix-tools.exes.plan-to-nix
+      dummy-ghc dummy-ghc-pkg cabal-install evalPackages.rsync evalPackages.gitMinimal evalPackages.allPkgConfigWrapper ]
+      ++ pkgs.lib.optional supportHpack nix-tools.exes.hpack;
     # Needed or stack-to-nix will die on unicode inputs
     LOCALE_ARCHIVE = pkgs.lib.optionalString (evalPackages.stdenv.buildPlatform.libc == "glibc") "${evalPackages.glibcLocales}/lib/locale/locale-archive";
     LANG = "en_US.UTF-8";
@@ -507,12 +422,20 @@ let
         if [ -e "$cabalFile" ]; then
           echo Ignoring $hpackFile as $cabalFile exists
         else
+          ${
           # warning: this may not generate the proper cabal file.
           # hpack allows globbing, and turns that into module lists
-          # without the source available (we cleaneSourceWith'd it),
+          # without the source available (we cleanSourceWith'd it),
           # this may not produce the right result.
-          echo No .cabal file found, running hpack on $hpackFile
-          hpack $hpackFile
+          if supportHpack
+            then '' 
+              echo No .cabal file found, running hpack on $hpackFile
+              hpack $hpackFile
+            ''
+            else ''
+              echo WARNING $hpackFile has no .cabal file and `supportHpack` was not set.
+            ''
+          }
         fi
       done
       )
@@ -527,26 +450,21 @@ let
     export SSL_CERT_FILE=${cacert}/etc/ssl/certs/ca-bundle.crt
     export GIT_SSL_CAINFO=${cacert}/etc/ssl/certs/ca-bundle.crt
 
-    # Using `cabal v2-freeze` will configure the project (since
-    # it is not configured yet), taking the existing `cabal.project.freeze`
-    # file into account.  Then it "writes out a freeze file which
-    # records all of the versions and flags that are picked" (from cabal docs).
-    echo "Using index-state ${index-state-found}"
-    HOME=${
+    CABAL_DIR=${
       # This creates `.cabal` directory that is as it would have
       # been at the time `cached-index-state`.  We may include
-      # some packages that will be excluded by `index-state-found`
-      # which is used by cabal (cached-index-state >= index-state-found).
+      # some packages that will be excluded by `index-state-max`
+      # which is used by cabal (cached-index-state >= index-state-max).
       dotCabal {
         inherit cabal-install nix-tools extra-hackage-tarballs;
         extra-hackage-repos = fixedProject.repos;
         index-state = cached-index-state;
         sha256 = index-sha256-found;
       }
-    } cabal v2-freeze ${
+    } make-install-plan ${
           # Setting the desired `index-state` here in case it is not
           # in the cabal.project file. This will further restrict the
-          # packages used by the solver (cached-index-state >= index-state-found).
+          # packages used by the solver (cached-index-state >= index-state-max).
           pkgs.lib.optionalString (index-state != null) "--index-state=${index-state}"
         } \
         -w ${
@@ -596,6 +514,11 @@ let
     # as they should not be in the output hash (they may change slightly
     # without affecting the nix).
     find $out \( -type f -or -type l \) ! -name '*.nix' -delete
+
+    # Make the revised cabal files available (after the delete step avove)
+    echo "Moving cabal files from $tmp${subDir'}/dist-newstyle/cabal-files to $out${subDir'}/cabal-files"
+    mv $tmp${subDir'}/dist-newstyle/cabal-files $out${subDir'}/cabal-files
+
     # Remove empty dirs
     find $out -type d -empty -delete
 
@@ -604,7 +527,6 @@ let
   '');
 in {
   projectNix = plan-nix;
-  index-state = index-state-found;
-  inherit src;
+  inherit index-state-max src;
   inherit (fixedProject) sourceRepos extra-hackages;
 }

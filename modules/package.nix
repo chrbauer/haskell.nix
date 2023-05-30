@@ -302,6 +302,11 @@ in {
       default = pkgs.fetchurl { url = "mirror://hackage/${config.name}.tar.gz"; inherit (config) sha256; };
       defaultText = "pkgs.fetchurl { url = \"mirror://hackage/\${config.name}.tar.gz\"; inherit (config) sha256; };";
     };
+    package-description-override = mkOption {
+      type = nullOr str;
+      default = null;
+      description = "Cabal file to use instead of the one shipped inside the package source distribution.";
+    };
     cabal-generator = mkOption {
       type = nullOr str;
       default = null;
@@ -350,11 +355,13 @@ in {
         # Exclude attributes that are likely to have conflicting definitions
         # (a common use case for `all` is in `shellFor` and it only has an
         # install phase).
-        builtins.removeAttrs c ["preCheck" "postCheck" "keepSource"]
+        builtins.removeAttrs c ["preCheck" "postCheck" "keepConfigFiles" "keepGhc" "keepSource"]
       ) (lib.filter (c: c.buildable && c.planned) allComps)
     ) // {
-      # If any one of the components needs us to keep the source
+      # If any one of the components needs us to keep one of these
       # then keep it for the `all` component
+      keepConfigFiles = lib.foldl' (x: comp: x || comp.keepConfigFiles) false allComps;
+      keepGhc = lib.foldl' (x: comp: x || comp.keepGhc) false allComps;
       keepSource = lib.foldl' (x: comp: x || comp.keepSource) false allComps;
     };
 }
